@@ -383,18 +383,17 @@ func runCmd() *cobra.Command {
 			return e
 		}
 		if e = cycle(); e != nil {
-			fmt.Fprintln(os.Stderr, e)
+			fmt.Fprintln(cmd.ErrOrStderr(), e)
 		}
 		ticker := time.NewTicker(d)
 		defer ticker.Stop()
 		for {
-			select {
-			case <-cmd.Context().Done():
+			waiting := newSpinner(cmd.Context(), cmd.ErrOrStderr(), "Waiting for next polling cycle...", 100*time.Millisecond, isTerminal(cmd.ErrOrStderr()))
+			if !waitForNextCycle(cmd.Context(), ticker.C, waiting) {
 				return nil
-			case <-ticker.C:
-				if e = cycle(); e != nil {
-					fmt.Fprintln(os.Stderr, e)
-				}
+			}
+			if e = cycle(); e != nil {
+				fmt.Fprintln(cmd.ErrOrStderr(), e)
 			}
 		}
 	}}
