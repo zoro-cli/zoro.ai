@@ -25,6 +25,12 @@ type Metadata struct {
 	DirtyAtPlanning bool      `yaml:"dirty_at_planning"`
 }
 
+type Match struct {
+	Path     string
+	State    string
+	Metadata Metadata
+}
+
 func Filename(issue int, title string) string {
 	return fmt.Sprintf("%d-%s.md", issue, repository.Slug(title))
 }
@@ -121,10 +127,14 @@ func Parse(path string) (Metadata, error) {
 	return m, e
 }
 func Find(root, base, itemID string, issue int) (string, Metadata, error) {
+	match, e := FindMatch(root, base, itemID, issue)
+	return match.Path, match.Metadata, e
+}
+func FindMatch(root, base, itemID string, issue int) (Match, error) {
 	for _, s := range States {
 		files, e := filepath.Glob(filepath.Join(root, base, s, "*.md"))
 		if e != nil {
-			return "", Metadata{}, e
+			return Match{}, e
 		}
 		sort.Strings(files)
 		for _, f := range files {
@@ -133,11 +143,11 @@ func Find(root, base, itemID string, issue int) (string, Metadata, error) {
 				continue
 			}
 			if itemID != "" && m.ProjectItemID == itemID || issue > 0 && m.Issue == issue {
-				return f, m, nil
+				return Match{Path: f, State: s, Metadata: m}, nil
 			}
 		}
 	}
-	return "", Metadata{}, nil
+	return Match{}, nil
 }
 func List(root, base, state string) ([]string, error) {
 	f, e := filepath.Glob(filepath.Join(root, base, state, "*.md"))

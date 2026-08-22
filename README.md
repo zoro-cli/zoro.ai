@@ -38,4 +38,6 @@ Initialization derives the GitHub owner and repository from `origin`, creates `.
 
 Set `automation.auto_implement: true` only when unattended Codex execution is intended. A repository lock prevents overlapping operations. Planning may inspect a dirty tree and records that fact; implementation refuses to run until changes are committed, stashed manually, or removed. Zoro never auto-stashes, resets, cleans, force-pushes, or deletes branches.
 
+Automatic cycles implement both newly planned handoffs and existing handoffs in `ready`. Handoffs already in another lifecycle state are not restarted automatically.
+
 Repository context excludes common build/vendor directories, binaries, `.env` files, private keys, credentials, and other likely secrets. External payloads and tokens are not logged.

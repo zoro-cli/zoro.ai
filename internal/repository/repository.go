@@ -52,6 +52,29 @@ func Status(ctx context.Context, root string) (string, bool, error) {
 	s, e := git(ctx, root, "status", "--porcelain")
 	return s, s != "", e
 }
+func StatusExcept(ctx context.Context, root string, allowedPath string) (string, bool, error) {
+	s, e := git(ctx, root, "status", "--porcelain", "--untracked-files=all")
+	if e != nil {
+		return "", false, e
+	}
+	rel, e := filepath.Rel(root, allowedPath)
+	if e != nil {
+		return "", false, e
+	}
+	rel = filepath.ToSlash(rel)
+	var remaining []string
+	for _, line := range strings.Split(s, "\n") {
+		if line == "" {
+			continue
+		}
+		path := strings.TrimSpace(line[3:])
+		if strings.Trim(path, `"`) != rel {
+			remaining = append(remaining, line)
+		}
+	}
+	s = strings.Join(remaining, "\n")
+	return s, s != "", nil
+}
 func Remote(ctx context.Context, root string) (string, string, error) {
 	s, e := git(ctx, root, "remote", "get-url", "origin")
 	if e != nil {
