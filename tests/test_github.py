@@ -2,7 +2,7 @@ import httpx
 import pytest
 
 from zoro.config import GitHubConfig
-from zoro.errors import AuthError, ProjectError
+from zoro.errors import AuthError, GitHubError, ProjectError
 from zoro.github import GitHubClient
 
 
@@ -43,3 +43,10 @@ def test_auth_failure() -> None:
     client = GitHubClient(GitHubConfig(), token="x", transport=transport)
     with pytest.raises(AuthError):
         client.get_project()
+
+
+def test_repository_404_does_not_claim_nonexistence() -> None:
+    transport = httpx.MockTransport(lambda request: httpx.Response(404, json={}))
+    client = GitHubClient(GitHubConfig(owner="o", repo="private"), token="x", transport=transport)
+    with pytest.raises(GitHubError, match="may not exist"):
+        client.verify_repository()

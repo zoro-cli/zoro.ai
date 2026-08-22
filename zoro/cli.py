@@ -13,11 +13,25 @@ from rich.table import Table
 
 from zoro import __version__
 from zoro.codex import codex_available
-from zoro.config import HANDOFF_STATES, initialize, load_config
-from zoro.errors import ZoroError
+from zoro.config import (
+    HANDOFF_STATES,
+    GitHubConfig,
+    ZoroConfig,
+    has_valid_repository,
+    initialize,
+    load_config,
+)
+from zoro.errors import ConfigError, ZoroError
 from zoro.github import GitHubClient, resolve_token
 from zoro.handoff import HandoffStore
-from zoro.repository import ensure_repository, executable_exists, git_status
+from zoro.repository import (
+    ensure_repository,
+    executable_exists,
+    git_remotes,
+    git_status,
+    repository_root,
+    resolve_repository_identity,
+)
 from zoro.runner import Runner
 
 app = typer.Typer(name="zoro", help="Local-first agentic development orchestrator.", no_args_is_help=True)
@@ -25,7 +39,7 @@ console = Console()
 
 
 def _root() -> Path:
-    return Path.cwd()
+    return repository_root(Path.cwd())
 
 
 def _runner() -> Runner:
@@ -50,14 +64,70 @@ def main(
 
 
 @app.command()
-def init() -> None:
+def init(project: int | None = typer.Option(None, "--project", min=1, help="GitHub Project number (avoids an interactive selection).")) -> None:
     """Initialize Zoro in the current repository."""
     try:
-        ensure_repository(_root())
-        created = initialize(_root())
-        console.print("[green]Initialized zoro.ai[/green]")
+        cwd = Path.cwd()
+        root = repository_root(cwd)
+        remotes = git_remotes(root)
+        remote_name = None
+        if "origin" not in remotes and len(remotes) > 1:
+            remote_name = questionary.select("Select the GitHub remote:", choices=list(remotes)).ask()
+            if remote_name is None:
+                raise typer.Abort()
+        identity = resolve_repository_identity(cwd, remote_name)
+        console.print("[bold]Repository[/bold]")
+        console.print(f"  [green]✓[/green] Root: {root}")
+        console.print(f"  [green]✓[/green] Remote: {identity.remote_url}")
+        console.print(f"  [green]✓[/green] {identity.owner}/{identity.repo}")
+
+        config_path = root / ".zoro/config.yaml"
+        existing = None
+        if config_path.exists():
+            existing = load_config(root)
+            incomplete = not has_valid_repository(existing.github)
+            prompt = "Repair incomplete Zoro configuration?" if incomplete else "zoro.ai is already initialized. Reinitialize?"
+            default = incomplete
+            if not questionary.confirm(prompt, default=default).ask():
+                console.print("Configuration unchanged.")
+                return
+
+        base = existing or ZoroConfig()
+        provisional = base.model_copy(update={"github": GitHubConfig(
+            owner=identity.owner, repo=identity.repo, project_number=project or base.github.project_number,
+            status_field=base.github.status_field, statuses=base.github.statuses,
+        )})
+        client = GitHubClient(provisional.github)
+        login = client.authenticated_user()
+        client.verify_repository()
+        console.print("[bold]GitHub[/bold]")
+        console.print(f"  [green]✓[/green] Logged in as {login}")
+        console.print("  [green]✓[/green] Repository access verified")
+
+        projects = client.list_projects()
+        if not projects:
+            raise ConfigError(f"No accessible GitHub Projects were found for {identity.owner}.")
+        if project is not None:
+            selected = next((item for item in projects if item.number == project), None)
+            if selected is None:
+                raise ConfigError(f"GitHub Project #{project} is not accessible for {identity.owner}.")
+        else:
+            choice = questionary.select(
+                "Select a GitHub Project:",
+                choices=[questionary.Choice(f"{item.title} (#{item.number})", value=item) for item in projects],
+            ).ask()
+            if choice is None:
+                raise typer.Abort()
+            selected = choice
+        final = provisional.model_copy(update={"github": provisional.github.model_copy(update={"project_number": selected.number})})
+        validation_client = GitHubClient(final.github, token=client.token)
+        project_info = validation_client.get_project()
+        client.close()
+        validation_client.close()
+        created = initialize(root, final, overwrite=config_path.exists())
+        console.print(f"[green]Initialized zoro.ai[/green] — {project_info.title} (#{selected.number})")
         for path in created:
-            console.print(f"  {path.relative_to(_root())}")
+            console.print(f"  {path.relative_to(root)}")
     except ZoroError as exc:
         _display_error(exc)
         raise typer.Exit(1) from exc
@@ -67,7 +137,11 @@ def init() -> None:
 def auth() -> None:
     """Verify GitHub repository and Project access."""
     try:
-        config = load_config(_root())
+        root = _root()
+        config = load_config(root)
+        if not has_valid_repository(config.github):
+            identity = resolve_repository_identity(root)
+            config = config.model_copy(update={"github": config.github.model_copy(update={"owner": identity.owner, "repo": identity.repo})})
         client = GitHubClient(config.github)
         client.verify_repository()
         project = client.get_project()

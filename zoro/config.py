@@ -12,6 +12,7 @@ from zoro.errors import ConfigError
 
 CONFIG_PATH = Path(".zoro/config.yaml")
 HANDOFF_STATES = ("ready", "implementing", "review", "done", "failed")
+PLACEHOLDER_VALUES = {"", "owner", "repository", "<owner>", "<repository>"}
 
 
 def parse_duration(value: str) -> int:
@@ -51,6 +52,10 @@ class GitHubConfig(StrictModel):
             review="In review", done="Done"
         )
     )
+
+
+def has_valid_repository(config: GitHubConfig) -> bool:
+    return config.owner.strip().lower() not in PLACEHOLDER_VALUES and config.repo.strip().lower() not in PLACEHOLDER_VALUES
 
 
 class SchedulerConfig(StrictModel):
@@ -147,14 +152,17 @@ def load_config(root: Path | None = None) -> ZoroConfig:
         raise ConfigError(f"Invalid configuration {path}: {exc}") from exc
 
 
-def initialize(root: Path | None = None) -> list[Path]:
+def initialize(root: Path | None = None, config: ZoroConfig | None = None, overwrite: bool = False) -> list[Path]:
     root = root or Path.cwd()
     created: list[Path] = []
     config_path = root / CONFIG_PATH
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    if not config_path.exists():
-        config = ZoroConfig()
-        config_path.write_text(yaml.safe_dump(config.model_dump(), sort_keys=False), encoding="utf-8")
+    if not config_path.exists() or overwrite:
+        if config is None:
+            raise ConfigError("Initialization requires a validated configuration.")
+        temporary = config_path.with_suffix(".yaml.tmp")
+        temporary.write_text(yaml.safe_dump(config.model_dump(), sort_keys=False), encoding="utf-8")
+        temporary.replace(config_path)
         created.append(config_path)
     handoff_root = root / "handoff"
     for state in HANDOFF_STATES:

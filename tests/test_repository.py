@@ -4,7 +4,14 @@ from pathlib import Path
 import pytest
 
 from zoro.errors import RepositoryError
-from zoro.repository import branch_name, collect_context, ensure_clean, git_status
+from zoro.repository import (
+    branch_name,
+    collect_context,
+    ensure_clean,
+    git_status,
+    parse_github_remote,
+    resolve_repository_identity,
+)
 
 
 def git(root: Path, *args: str) -> None:
@@ -41,3 +48,29 @@ def test_context_is_bounded_and_excludes_secrets(repo: Path) -> None:
     context = collect_context(repo, "Refresh token", "rotation", max_files=5, max_bytes=10_000)
     assert "src/auth.py" in context.files
     assert ".env" not in context.files
+
+
+@pytest.mark.parametrize(("remote", "owner", "name"), [
+    ("git@github.com:nenjotech/zoro-ai.git", "nenjotech", "zoro-ai"),
+    ("https://github.com/nenjotech/zoro-ai.git", "nenjotech", "zoro-ai"),
+    ("https://github.com/acme/platform", "acme", "platform"),
+    ("ssh://git@github.com/acme/platform.git", "acme", "platform"),
+])
+def test_parse_github_remote(remote: str, owner: str, name: str) -> None:
+    result = parse_github_remote("origin", remote)
+    assert (result.owner, result.repo) == (owner, name)
+
+
+def test_nested_repository_resolution(repo: Path) -> None:
+    git(repo, "remote", "add", "origin", "git@github.com:acme/platform.git")
+    nested = repo / "src/nested"
+    nested.mkdir()
+    result = resolve_repository_identity(nested)
+    assert result.root == repo.resolve()
+    assert (result.owner, result.repo) == ("acme", "platform")
+
+
+@pytest.mark.parametrize("remote", ["", "git@gitlab.com:a/b.git", "https://bitbucket.org/a/b.git", "bad"])
+def test_invalid_remote(remote: str) -> None:
+    with pytest.raises(RepositoryError, match="Unsupported Git remote"):
+        parse_github_remote("origin", remote)

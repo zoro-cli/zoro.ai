@@ -10,7 +10,7 @@ import httpx
 
 from zoro.config import GitHubConfig
 from zoro.errors import AuthError, GitHubError, ProjectError
-from zoro.models import ProjectInfo, ProjectItem
+from zoro.models import ProjectInfo, ProjectItem, ProjectSummary
 
 GRAPHQL_URL = "https://api.github.com/graphql"
 PROJECT_QUERY = """
@@ -46,6 +46,14 @@ mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
 }
 """
 
+VIEWER_QUERY = "query { viewer { login } }"
+PROJECTS_QUERY = """
+query($owner: String!) {
+  organization(login: $owner) { projectsV2(first: 100) { nodes { number title } } }
+  user(login: $owner) { projectsV2(first: 100) { nodes { number title } } }
+}
+"""
+
 
 def resolve_token() -> str:
     for name in ("ZORO_GITHUB_TOKEN", "GH_TOKEN"):
@@ -74,6 +82,11 @@ class GitHubClient:
     def close(self) -> None:
         self._client.close()
 
+    @property
+    def token(self) -> str:
+        """Return the resolved token for creating a sibling client without resolving again."""
+        return self._token
+
     def _graphql(self, query: str, variables: dict) -> dict:
         try:
             response = self._client.post("/graphql", json={"query": query, "variables": variables})
@@ -89,12 +102,27 @@ class GitHubClient:
         return payload["data"]
 
     def verify_repository(self) -> None:
-        response = self._client.get(f"/repos/{self.config.owner}/{self.config.repo}")
+        try:
+            response = self._client.get(f"/repos/{self.config.owner}/{self.config.repo}")
+        except httpx.HTTPError as exc:
+            raise GitHubError(f"GitHub request failed: {exc}") from exc
         if response.status_code in (401, 403):
             raise AuthError("GitHub authentication failed or token lacks repository access.")
         if response.status_code == 404:
-            raise GitHubError(f"Repository not found: {self.config.owner}/{self.config.repo}")
-        response.raise_for_status()
+            raise GitHubError(
+                f"Unable to access GitHub repository: {self.config.owner}/{self.config.repo}. "
+                "It may not exist, or the current credentials may not have permission to access it."
+            )
+        if response.is_error:
+            raise GitHubError(f"GitHub returned HTTP {response.status_code} while verifying repository access.")
+
+    def authenticated_user(self) -> str:
+        return self._graphql(VIEWER_QUERY, {})["viewer"]["login"]
+
+    def list_projects(self) -> list[ProjectSummary]:
+        data = self._graphql(PROJECTS_QUERY, {"owner": self.config.owner})
+        container = data.get("organization") or data.get("user") or {}
+        return [ProjectSummary.model_validate(node) for node in container.get("projectsV2", {}).get("nodes", [])]
 
     def get_project(self) -> ProjectInfo:
         nodes: list[dict] = []

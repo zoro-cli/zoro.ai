@@ -56,7 +56,7 @@ On PowerShell, use `$env:OPENAI_API_KEY = "your-key"`.
 zoro init
 ```
 
-Edit `.zoro/config.yaml`, replacing `OWNER`, `REPOSITORY`, and the project number. Initialization also creates:
+Zoro detects the repository from its GitHub remote, verifies authentication and repository access, and prompts for an accessible GitHub Project. Use `zoro init --project NUMBER` to select a project non-interactively. Initialization then creates:
 
 ```text
 .zoro/runtime/

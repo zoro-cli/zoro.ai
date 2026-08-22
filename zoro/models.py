@@ -64,6 +64,19 @@ class RepositoryContext(BaseModel):
     git_status: str = ""
 
 
+class RepositoryIdentity(BaseModel):
+    root: Path
+    remote_name: str
+    remote_url: str
+    owner: str
+    repo: str
+
+
+class ProjectSummary(BaseModel):
+    number: int
+    title: str
+
+
 class CommandResult(BaseModel):
     command: str
     exit_code: int

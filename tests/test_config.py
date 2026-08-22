@@ -4,17 +4,23 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from zoro.config import ZoroConfig, initialize, load_config, parse_duration
+from zoro.config import GitHubConfig, ZoroConfig, has_valid_repository, initialize, load_config, parse_duration
 from zoro.errors import ConfigError
 
 
 def test_valid_config_and_initialize(tmp_path: Path) -> None:
     (tmp_path / ".gitignore").write_text("", encoding="utf-8")
-    initialize(tmp_path)
+    initialize(tmp_path, ZoroConfig(github=GitHubConfig(owner="acme", repo="app")))
     config = load_config(tmp_path)
     assert config.github.project_number == 1
     assert (tmp_path / "handoff/ready").is_dir()
     assert ".zoro/runtime/" in (tmp_path / ".gitignore").read_text(encoding="utf-8")
+
+
+def test_placeholder_repository_is_incomplete() -> None:
+    assert not has_valid_repository(GitHubConfig())
+    assert not has_valid_repository(GitHubConfig(owner="", repo=""))
+    assert has_valid_repository(GitHubConfig(owner="acme", repo="app"))
 
 
 @pytest.mark.parametrize("value", ["", "1d", "0s", "soon", "1.5m"])

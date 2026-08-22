@@ -9,7 +9,7 @@ import subprocess
 from pathlib import Path
 
 from zoro.errors import RepositoryError
-from zoro.models import RepositoryContext
+from zoro.models import RepositoryContext, RepositoryIdentity
 
 EXCLUDED_DIRS = {".git", ".venv", "node_modules", "vendor", "dist", "build", "coverage", "__pycache__"}
 SECRET_PATTERNS = (".env", ".env.*", "*.pem", "*.key", "id_rsa", "id_ed25519", "credentials*", "secrets*")
@@ -35,6 +35,53 @@ def ensure_repository(root: Path) -> None:
     result = _run(root, "git", "rev-parse", "--is-inside-work-tree", check=False)
     if result.returncode or result.stdout.strip() != "true":
         raise RepositoryError(f"Not inside a Git repository: {root}")
+
+
+def repository_root(cwd: Path) -> Path:
+    result = _run(cwd, "git", "rev-parse", "--show-toplevel", check=False)
+    if result.returncode or not result.stdout.strip():
+        raise RepositoryError(
+            "Current directory is not a Git repository.\n\nInitialize Git first:\n\n"
+            "  git init\n\nor run zoro inside an existing repository."
+        )
+    return Path(result.stdout.strip()).resolve()
+
+
+def git_remotes(root: Path) -> dict[str, str]:
+    names = _run(root, "git", "remote").stdout.splitlines()
+    return {name: _run(root, "git", "remote", "get-url", name).stdout.strip() for name in names}
+
+
+def parse_github_remote(remote_name: str, remote_url: str, root: Path | None = None) -> RepositoryIdentity:
+    value = remote_url.strip()
+    patterns = (
+        r"^git@github\.com:(?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?$",
+        r"^https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?/?$",
+        r"^ssh://git@github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?/?$",
+    )
+    match = next((match for pattern in patterns if (match := re.fullmatch(pattern, value, re.IGNORECASE))), None)
+    if not match:
+        raise RepositoryError(f"Unsupported Git remote:\n\n  {value or '(empty)'}\n\nzoro.ai currently supports GitHub repositories only.")
+    return RepositoryIdentity(
+        root=(root or Path.cwd()).resolve(), remote_name=remote_name, remote_url=value,
+        owner=match.group("owner"), repo=match.group("repo"),
+    )
+
+
+def resolve_repository_identity(cwd: Path, remote_name: str | None = None) -> RepositoryIdentity:
+    root = repository_root(cwd)
+    remotes = git_remotes(root)
+    if not remotes:
+        raise RepositoryError(
+            "Git repository detected, but no Git remote exists.\n\nAdd a GitHub remote first:\n\n"
+            "  git remote add origin <repository-url>\n\nThen run:\n\n  zoro init"
+        )
+    selected = remote_name or ("origin" if "origin" in remotes else next(iter(remotes)) if len(remotes) == 1 else None)
+    if selected is None:
+        raise RepositoryError("Multiple Git remotes exist and no origin is configured: " + ", ".join(remotes))
+    if selected not in remotes:
+        raise RepositoryError(f"Git remote does not exist: {selected}")
+    return parse_github_remote(selected, remotes[selected], root)
 
 
 def git_status(root: Path) -> str:
