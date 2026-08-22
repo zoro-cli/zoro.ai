@@ -3,16 +3,20 @@ package handoff
 import (
 	"bytes"
 	"fmt"
-	"github.com/zoro-cli/zoro.ai/internal/planner"
-	"github.com/zoro-cli/zoro.ai/internal/repository"
-	"gopkg.in/yaml.v3"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	"github.com/zoro-cli/zoro.ai/internal/planner"
+	"github.com/zoro-cli/zoro.ai/internal/repository"
+	"gopkg.in/yaml.v3"
 )
+
+const maxFilenameLength = 140
 
 var States = []string{"ready", "implementing", "review", "done", "failed"}
 
@@ -32,7 +36,14 @@ type Match struct {
 }
 
 func Filename(issue int, title string) string {
-	return fmt.Sprintf("%d-%s.md", issue, repository.Slug(title))
+	prefix := fmt.Sprintf("%d-", issue)
+	suffix := ".md"
+	slug := repository.Slug(title)
+	slugBudget := maxFilenameLength - utf8.RuneCountInString(prefix) - utf8.RuneCountInString(suffix)
+	if utf8.RuneCountInString(slug) > slugBudget {
+		slug = strings.TrimRight(string([]rune(slug)[:slugBudget]), "-")
+	}
+	return prefix + slug + suffix
 }
 func Ensure(root, base string) error {
 	for _, s := range States {
