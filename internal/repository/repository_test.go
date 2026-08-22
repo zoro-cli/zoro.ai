@@ -58,3 +58,85 @@ func TestStatusExceptAllowsOnlySelectedHandoff(t *testing.T) {
 		t.Fatalf("status=%q dirty=%t error=%v", status, dirty, e)
 	}
 }
+
+func TestAddPathsAndCommitScopesHandoffMove(t *testing.T) {
+	root := initRepository(t)
+	ready := filepath.Join(root, "handoff", "ready", "9-work.md")
+	implementing := filepath.Join(root, "handoff", "implementing", "9-work.md")
+	writeTestFile(t, ready, "handoff")
+	runGit(t, root, "add", ".")
+	runGit(t, root, "commit", "-m", "initial")
+	if e := os.MkdirAll(filepath.Dir(implementing), 0755); e != nil {
+		t.Fatal(e)
+	}
+	if e := os.Rename(ready, implementing); e != nil {
+		t.Fatal(e)
+	}
+	writeTestFile(t, filepath.Join(root, "unrelated.txt"), "leave me unstaged")
+	if e := AddPaths(context.Background(), root, ready, implementing); e != nil {
+		t.Fatal(e)
+	}
+	if e := Commit(context.Background(), root, "start issue #9"); e != nil {
+		t.Fatal(e)
+	}
+	show := runGit(t, root, "show", "--format=", "--name-status", "HEAD")
+	if !strings.Contains(show, "handoff/implementing/9-work.md") || strings.Contains(show, "unrelated.txt") {
+		t.Fatalf("unexpected committed paths:\n%s", show)
+	}
+}
+
+func TestAddAllHasStagedChangesAndCommit(t *testing.T) {
+	root := initRepository(t)
+	writeTestFile(t, filepath.Join(root, "tracked.txt"), "before")
+	runGit(t, root, "add", ".")
+	runGit(t, root, "commit", "-m", "initial")
+	writeTestFile(t, filepath.Join(root, "tracked.txt"), "after")
+	writeTestFile(t, filepath.Join(root, "new.txt"), "new")
+	if e := AddAll(context.Background(), root); e != nil {
+		t.Fatal(e)
+	}
+	staged, e := HasStagedChanges(context.Background(), root)
+	if e != nil || !staged {
+		t.Fatalf("staged=%t error=%v", staged, e)
+	}
+	if e = Commit(context.Background(), root, "complete issue #9"); e != nil {
+		t.Fatal(e)
+	}
+	if got := runGit(t, root, "status", "--porcelain"); got != "" {
+		t.Fatalf("dirty repository: %s", got)
+	}
+	staged, e = HasStagedChanges(context.Background(), root)
+	if e != nil || staged {
+		t.Fatalf("staged=%t error=%v", staged, e)
+	}
+}
+
+func initRepository(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	runGit(t, root, "init", "-q")
+	runGit(t, root, "config", "user.name", "Zoro Test")
+	runGit(t, root, "config", "user.email", "zoro@example.invalid")
+	return root
+}
+
+func writeTestFile(t *testing.T, path, content string) {
+	t.Helper()
+	if e := os.MkdirAll(filepath.Dir(path), 0755); e != nil {
+		t.Fatal(e)
+	}
+	if e := os.WriteFile(path, []byte(content), 0644); e != nil {
+		t.Fatal(e)
+	}
+}
+
+func runGit(t *testing.T, root string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = root
+	out, e := cmd.CombinedOutput()
+	if e != nil {
+		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), e, out)
+	}
+	return strings.TrimSpace(string(out))
+}

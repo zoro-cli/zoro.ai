@@ -32,6 +32,40 @@ type state struct {
 	project gh.Project
 }
 
+var (
+	runCodex      = codex.Run
+	runValidation = validation.Run
+)
+
+func implementationStartMessage(issue int) string {
+	return fmt.Sprintf("zoro: start implementation for issue #%d", issue)
+}
+
+func implementationCompleteMessage(issue int) string {
+	return fmt.Sprintf("zoro: complete implementation for issue #%d", issue)
+}
+
+func restoreImplementationStart(ctx context.Context, s state, original, current string, item gh.ProjectItem, staged bool) error {
+	var problems []string
+	if staged {
+		if e := repository.UnstagePaths(ctx, s.root, original, current); e != nil {
+			problems = append(problems, "unstage handoff: "+e.Error())
+		}
+	}
+	if _, e := handoff.Move(current, s.root, s.cfg.Handoff.Directory, "ready"); e != nil {
+		problems = append(problems, "restore handoff: "+e.Error())
+	}
+	if s.cfg.Behavior.MoveToInProgress {
+		if e := s.client.UpdateStatus(ctx, s.project, item.ID, s.cfg.GitHub.Statuses.Ready); e != nil {
+			problems = append(problems, "restore board status: "+e.Error())
+		}
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("compensation failed: %s", strings.Join(problems, "; "))
+	}
+	return nil
+}
+
 func Execute() error {
 	ctx, cancel := signalContext()
 	defer cancel()
@@ -303,23 +337,38 @@ func implementLocked(ctx context.Context, s state, path string, item gh.ProjectI
 			return e
 		}
 	}
-	if cfg.Behavior.MoveToInProgress {
-		if e = s.client.UpdateStatus(ctx, s.project, item.ID, cfg.GitHub.Statuses.Implementing); e != nil {
-			return e
-		}
-	}
 	current, e := handoff.Move(path, root, cfg.Handoff.Directory, "implementing")
 	if e != nil {
 		return e
 	}
-	result, e := codex.Run(ctx, root, current)
+	if cfg.Behavior.MoveToInProgress {
+		if e = s.client.UpdateStatus(ctx, s.project, item.ID, cfg.GitHub.Statuses.Implementing); e != nil {
+			if restoreErr := restoreImplementationStart(ctx, s, path, current, item, false); restoreErr != nil {
+				return fmt.Errorf("board synchronization failed: %w; %v", e, restoreErr)
+			}
+			return e
+		}
+	}
+	if e = repository.AddPaths(ctx, root, path, current); e != nil {
+		if restoreErr := restoreImplementationStart(ctx, s, path, current, item, true); restoreErr != nil {
+			return fmt.Errorf("stage implementation-start handoff: %w; %v", e, restoreErr)
+		}
+		return fmt.Errorf("stage implementation-start handoff: %w", e)
+	}
+	if e = repository.Commit(ctx, root, implementationStartMessage(m.Issue)); e != nil {
+		if restoreErr := restoreImplementationStart(ctx, s, path, current, item, true); restoreErr != nil {
+			return fmt.Errorf("commit implementation-start handoff: %w; %v", e, restoreErr)
+		}
+		return fmt.Errorf("commit implementation-start handoff: %w", e)
+	}
+	result, e := runCodex(ctx, root, current)
 	if e != nil {
 		_, _ = handoff.Move(current, root, cfg.Handoff.Directory, "failed")
 		return e
 	}
 	fmt.Print(result.Stdout)
 	if cfg.Implementation.Validation.Enabled {
-		results, e := validation.Run(ctx, root, cfg.Implementation.Validation.Commands)
+		results, e := runValidation(ctx, root, cfg.Implementation.Validation.Commands)
 		for _, r := range results {
 			fmt.Printf("Validated %s (%s)\n", r.Command, r.Duration.Round(time.Millisecond))
 		}
@@ -331,6 +380,19 @@ func implementLocked(ctx context.Context, s state, path string, item gh.ProjectI
 	review, e := handoff.Move(current, root, cfg.Handoff.Directory, "review")
 	if e != nil {
 		return e
+	}
+	if e = repository.AddAll(ctx, root); e != nil {
+		return fmt.Errorf("stage completed implementation: %w", e)
+	}
+	staged, e := repository.HasStagedChanges(ctx, root)
+	if e != nil {
+		return fmt.Errorf("inspect completed implementation: %w", e)
+	}
+	if !staged {
+		return fmt.Errorf("completed implementation produced no changes to commit")
+	}
+	if e = repository.Commit(ctx, root, implementationCompleteMessage(m.Issue)); e != nil {
+		return fmt.Errorf("commit completed implementation: %w", e)
 	}
 	if cfg.Behavior.MoveToReview {
 		if e = s.client.UpdateStatus(ctx, s.project, item.ID, cfg.GitHub.Statuses.Review); e != nil {
