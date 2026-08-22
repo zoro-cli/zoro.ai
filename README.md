@@ -33,7 +33,7 @@ Initialization derives the GitHub owner and repository from `origin`, creates `.
 - `zoro board` prints status counts; `zoro ready` prints Ready items in project connection order.
 - `zoro plan [issue]` collects bounded, secret-filtered repository context and asks OpenAI for a structured plan. Zoro validates the JSON and renders deterministic Markdown in `handoff/ready`.
 - `zoro implement [issue]` selects a handoff, requires a clean tree, creates a `zoro/<issue>-<slug>` branch, moves the card to In progress, runs Codex and validation, then moves the handoff/card to review. It never marks work Done.
-- `zoro run --once` performs one planning cycle. `zoro run` repeats at `scheduler.interval` and exits on SIGINT/SIGTERM.
+- `zoro run --once` performs one planning cycle. `zoro run` repeats at `scheduler.interval`, shows a waiting spinner in interactive terminals, and exits on SIGINT/SIGTERM. Redirected output remains plain.
 - `zoro status` reports local state. `zoro config` prints non-secret effective configuration; `zoro config path` prints its path.
 
 Set `automation.auto_implement: true` only when unattended Codex execution is intended. A repository lock prevents overlapping operations. Planning may inspect a dirty tree and records that fact; implementation refuses to run until changes are committed, stashed manually, or removed. Zoro never auto-stashes, resets, cleans, force-pushes, or deletes branches.
