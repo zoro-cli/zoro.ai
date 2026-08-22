@@ -264,18 +264,11 @@ func implement(ctx context.Context, root string, cfg config.Config, path string)
 		return e
 	}
 	defer lock.Release()
-	status, dirty, e := repository.Status(ctx, root)
+	s, e := remoteState(ctx)
 	if e != nil {
 		return e
-	}
-	if dirty {
-		return fmt.Errorf("cannot start implementation; repository contains uncommitted changes:\n%s", status)
 	}
 	m, e := handoff.Parse(path)
-	if e != nil {
-		return e
-	}
-	s, e := remoteState(ctx)
 	if e != nil {
 		return e
 	}
@@ -285,6 +278,21 @@ func implement(ctx context.Context, root string, cfg config.Config, path string)
 			item = x
 			break
 		}
+	}
+	return implementLocked(ctx, s, path, item)
+}
+func implementLocked(ctx context.Context, s state, path string, item gh.ProjectItem) error {
+	root, cfg := s.root, s.cfg
+	status, dirty, e := repository.StatusExcept(ctx, root, path)
+	if e != nil {
+		return e
+	}
+	if dirty {
+		return fmt.Errorf("cannot start implementation; repository contains uncommitted changes:\n%s", status)
+	}
+	m, e := handoff.Parse(path)
+	if e != nil {
+		return e
 	}
 	if item.ID == "" {
 		return fmt.Errorf("project item for handoff was not found")
@@ -332,6 +340,27 @@ func implement(ctx context.Context, root string, cfg config.Config, path string)
 	fmt.Printf("Implementation ready for review: %s\n", review)
 	return nil
 }
+
+type cycleAction int
+
+const (
+	cycleSkip cycleAction = iota
+	cyclePlan
+	cycleImplement
+)
+
+func decideCycle(match handoff.Match, cfg config.AutomationConfig) cycleAction {
+	if match.Path != "" {
+		if match.State == "ready" && cfg.AutoImplement {
+			return cycleImplement
+		}
+		return cycleSkip
+	}
+	if cfg.AutoPlan {
+		return cyclePlan
+	}
+	return cycleSkip
+}
 func runCmd() *cobra.Command {
 	var once bool
 	c := &cobra.Command{Use: "run", Short: "Poll and process Ready work", RunE: func(cmd *cobra.Command, args []string) error {
@@ -344,34 +373,39 @@ func runCmd() *cobra.Command {
 			if e != nil {
 				return e
 			}
+			defer lock.Release()
 			s, e := remoteState(cmd.Context())
 			if e != nil {
-				lock.Release()
 				return e
 			}
 			items := s.project.Ready(cfg.GitHub.Statuses.Ready)
 			if len(items) == 0 {
-				lock.Release()
 				fmt.Println("No Ready items.")
 				return nil
 			}
-			if !cfg.Automation.AutoPlan {
-				lock.Release()
-				fmt.Println("Automatic planning is disabled.")
-				return nil
-			}
-			path, e := createPlan(cmd.Context(), s, items[0])
-			lock.Release()
+			item := items[0]
+			match, e := handoff.FindMatch(root, cfg.Handoff.Directory, item.ID, item.IssueNumber)
 			if e != nil {
-				if strings.Contains(e.Error(), "already has a handoff") {
-					fmt.Println(e)
-					return nil
-				}
 				return e
 			}
-			fmt.Printf("Handoff created: %s\n", path)
-			if cfg.Automation.AutoImplement {
-				return implement(cmd.Context(), root, cfg, path)
+			switch decideCycle(match, cfg.Automation) {
+			case cycleImplement:
+				return implementLocked(cmd.Context(), s, match.Path, item)
+			case cyclePlan:
+				path, e := createPlan(cmd.Context(), s, item)
+				if e != nil {
+					return e
+				}
+				fmt.Printf("Handoff created: %s\n", path)
+				if cfg.Automation.AutoImplement {
+					return implementLocked(cmd.Context(), s, path, item)
+				}
+			default:
+				if match.Path != "" {
+					fmt.Printf("Item already has a %s handoff: %s\n", match.State, match.Path)
+				} else {
+					fmt.Println("Automatic planning is disabled.")
+				}
 			}
 			return nil
 		}
