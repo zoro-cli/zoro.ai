@@ -40,4 +40,6 @@ Set `automation.auto_implement: true` only when unattended Codex execution is in
 
 Automatic cycles implement both newly planned handoffs and existing handoffs in `ready`. Handoffs already in another lifecycle state are not restarted automatically.
 
+Ready handoffs are also mirrored to their GitHub issue discussion. Zoro appends a hidden handoff identity marker and checks all existing issue comments so repeated cycles do not intentionally post duplicates. Draft project items without an issue discussion cannot be synchronized.
+
 Repository context excludes common build/vendor directories, binaries, `.env` files, private keys, credentials, and other likely secrets. External payloads and tokens are not logged.

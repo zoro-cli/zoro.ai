@@ -9,6 +9,7 @@ import (
 	"github.com/zoro-cli/zoro.ai/internal/config"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -31,6 +32,10 @@ type Project struct {
 	ID, Title, StatusFieldID string
 	StatusOptions            map[string]string
 	Items                    []ProjectItem
+}
+
+type IssueComment struct {
+	Body string `json:"body"`
 }
 
 func New(token string) *Client {
@@ -93,6 +98,35 @@ func (c *Client) GraphQL(ctx context.Context, q string, vars map[string]any, out
 }
 func (c *Client) VerifyRepository(ctx context.Context, owner, repo string) error {
 	_, e := c.request(ctx, "GET", fmt.Sprintf("%s/repos/%s/%s", c.RESTURL, owner, repo), nil)
+	return e
+}
+
+func (c *Client) ListIssueComments(ctx context.Context, owner, repo string, issue int) ([]IssueComment, error) {
+	var comments []IssueComment
+	base := fmt.Sprintf("%s/repos/%s/%s/issues/%d/comments", c.RESTURL, url.PathEscape(owner), url.PathEscape(repo), issue)
+	for page := 1; ; page++ {
+		b, e := c.request(ctx, "GET", fmt.Sprintf("%s?per_page=100&page=%d", base, page), nil)
+		if e != nil {
+			return nil, e
+		}
+		var batch []IssueComment
+		if e = json.Unmarshal(b, &batch); e != nil {
+			return nil, fmt.Errorf("%w: decode issue comments: %v", app.ErrGitHub, e)
+		}
+		comments = append(comments, batch...)
+		if len(batch) < 100 {
+			return comments, nil
+		}
+	}
+}
+
+func (c *Client) CreateIssueComment(ctx context.Context, owner, repo string, issue int, body string) error {
+	payload, e := json.Marshal(IssueComment{Body: body})
+	if e != nil {
+		return e
+	}
+	endpoint := fmt.Sprintf("%s/repos/%s/%s/issues/%d/comments", c.RESTURL, url.PathEscape(owner), url.PathEscape(repo), issue)
+	_, e = c.request(ctx, "POST", endpoint, payload)
 	return e
 }
 

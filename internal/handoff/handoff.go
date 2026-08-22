@@ -17,6 +17,7 @@ import (
 )
 
 const maxFilenameLength = 140
+const MaxCommentRunes = 65536
 
 var States = []string{"ready", "implementing", "review", "done", "failed"}
 
@@ -136,6 +137,29 @@ func Parse(path string) (Metadata, error) {
 	}
 	e = yaml.Unmarshal(parts[1], &m)
 	return m, e
+}
+
+func CommentMarker(repository, projectItemID string) string {
+	return fmt.Sprintf("<!-- zoro-handoff repository=%q project_item_id=%q -->", repository, projectItemID)
+}
+
+func CommentBody(path string, expected Metadata) (string, error) {
+	b, e := os.ReadFile(path)
+	if e != nil {
+		return "", e
+	}
+	m, e := Parse(path)
+	if e != nil {
+		return "", e
+	}
+	if m.Repository == "" || m.Repository != expected.Repository || m.ProjectItemID == "" || m.ProjectItemID != expected.ProjectItemID || m.Issue <= 0 || m.Issue != expected.Issue {
+		return "", fmt.Errorf("handoff identity does not match the Ready issue")
+	}
+	body := string(b) + "\n" + CommentMarker(m.Repository, m.ProjectItemID)
+	if utf8.RuneCountInString(body) > MaxCommentRunes {
+		return "", fmt.Errorf("handoff comment exceeds GitHub's %d character limit", MaxCommentRunes)
+	}
+	return body, nil
 }
 func Find(root, base, itemID string, issue int) (string, Metadata, error) {
 	match, e := FindMatch(root, base, itemID, issue)

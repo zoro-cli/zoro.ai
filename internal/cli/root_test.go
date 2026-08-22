@@ -2,6 +2,9 @@ package cli
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +14,7 @@ import (
 	"github.com/zoro-cli/zoro.ai/internal/config"
 	gh "github.com/zoro-cli/zoro.ai/internal/github"
 	"github.com/zoro-cli/zoro.ai/internal/handoff"
+	"github.com/zoro-cli/zoro.ai/internal/planner"
 	"github.com/zoro-cli/zoro.ai/internal/process"
 	"github.com/zoro-cli/zoro.ai/internal/validation"
 )
@@ -42,6 +46,51 @@ func TestDecideCycle(t *testing.T) {
 				t.Fatalf("got %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestEnsureHandoffCommentCreatesOnce(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.Default("acme", "app", 1)
+	item := gh.ProjectItem{ID: "item-7", IssueNumber: 7, Title: "Work", Status: cfg.GitHub.Statuses.Ready, Repository: "acme/app"}
+	path, e := handoff.Save(root, cfg.Handoff.Directory, handoff.Metadata{Repository: "acme/app", ProjectItemID: item.ID, Issue: 7, Title: item.Title}, planner.Plan{Summary: "Plan body"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	posts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			if posts == 0 {
+				fmt.Fprint(w, `[]`)
+			} else {
+				fmt.Fprintf(w, `[{"body":%q}]`, handoff.CommentMarker("acme/app", item.ID))
+			}
+			return
+		}
+		posts++
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{}`)
+	}))
+	defer srv.Close()
+	client := gh.New("token")
+	client.RESTURL = srv.URL
+	s := state{root: root, cfg: cfg, client: client}
+	if e = ensureHandoffComment(context.Background(), s, path, item); e != nil {
+		t.Fatal(e)
+	}
+	if e = ensureHandoffComment(context.Background(), s, path, item); e != nil {
+		t.Fatal(e)
+	}
+	if posts != 1 {
+		t.Fatalf("created %d comments", posts)
+	}
+}
+
+func TestEnsureHandoffCommentRejectsNonIssue(t *testing.T) {
+	cfg := config.Default("acme", "app", 1)
+	e := ensureHandoffComment(context.Background(), state{cfg: cfg}, "unused", gh.ProjectItem{ID: "draft", Title: "Draft"})
+	if e == nil || !strings.Contains(e.Error(), "not backed") {
+		t.Fatalf("unexpected error %v", e)
 	}
 }
 

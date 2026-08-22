@@ -237,8 +237,15 @@ func planCmd() *cobra.Command {
 	}}
 }
 func createPlan(ctx context.Context, s state, it gh.ProjectItem) (string, error) {
-	if p, _, _ := handoff.Find(s.root, s.cfg.Handoff.Directory, it.ID, it.IssueNumber); p != "" {
-		return "", fmt.Errorf("item already has a handoff: %s", p)
+	if p, _, e := handoff.Find(s.root, s.cfg.Handoff.Directory, it.ID, it.IssueNumber); e != nil {
+		return "", e
+	} else if p != "" {
+		if it.Status == s.cfg.GitHub.Statuses.Ready {
+			if e = ensureHandoffComment(ctx, s, p, it); e != nil {
+				return "", e
+			}
+		}
+		return p, nil
 	}
 	rc, e := repository.Collect(ctx, s.root, it.Title+" "+it.Body, s.cfg.Planning.MaxFiles, s.cfg.Planning.MaxContextBytes)
 	if e != nil {
@@ -248,7 +255,44 @@ func createPlan(ctx context.Context, s state, it gh.ProjectItem) (string, error)
 	if e != nil {
 		return "", e
 	}
-	return handoff.Save(s.root, s.cfg.Handoff.Directory, handoff.Metadata{Repository: s.cfg.GitHub.Owner + "/" + s.cfg.GitHub.Repo, ProjectItemID: it.ID, Issue: it.IssueNumber, Title: it.Title, CreatedAt: time.Now().UTC(), DirtyAtPlanning: rc.Dirty}, p)
+	path, e := handoff.Save(s.root, s.cfg.Handoff.Directory, handoff.Metadata{Repository: s.cfg.GitHub.Owner + "/" + s.cfg.GitHub.Repo, ProjectItemID: it.ID, Issue: it.IssueNumber, Title: it.Title, CreatedAt: time.Now().UTC(), DirtyAtPlanning: rc.Dirty}, p)
+	if e != nil {
+		return "", e
+	}
+	if it.Status == s.cfg.GitHub.Statuses.Ready {
+		if e = ensureHandoffComment(ctx, s, path, it); e != nil {
+			return "", e
+		}
+	}
+	return path, nil
+}
+
+func ensureHandoffComment(ctx context.Context, s state, path string, it gh.ProjectItem) error {
+	if it.IssueNumber <= 0 || it.Repository == "" {
+		return fmt.Errorf("Ready project item %q is not backed by a commentable GitHub issue", it.Title)
+	}
+	repositoryName := s.cfg.GitHub.Owner + "/" + s.cfg.GitHub.Repo
+	if it.Repository != repositoryName {
+		return fmt.Errorf("Ready issue belongs to %s, not configured repository %s", it.Repository, repositoryName)
+	}
+	body, e := handoff.CommentBody(path, handoff.Metadata{Repository: repositoryName, ProjectItemID: it.ID, Issue: it.IssueNumber})
+	if e != nil {
+		return fmt.Errorf("prepare handoff comment: %w", e)
+	}
+	marker := handoff.CommentMarker(repositoryName, it.ID)
+	comments, e := s.client.ListIssueComments(ctx, s.cfg.GitHub.Owner, s.cfg.GitHub.Repo, it.IssueNumber)
+	if e != nil {
+		return fmt.Errorf("list handoff comments: %w", e)
+	}
+	for _, comment := range comments {
+		if strings.Contains(comment.Body, marker) {
+			return nil
+		}
+	}
+	if e = s.client.CreateIssueComment(ctx, s.cfg.GitHub.Owner, s.cfg.GitHub.Repo, it.IssueNumber, body); e != nil {
+		return fmt.Errorf("create handoff comment: %w", e)
+	}
+	return nil
 }
 
 func implementCmd() *cobra.Command {
@@ -449,6 +493,11 @@ func runCmd() *cobra.Command {
 			match, e := handoff.FindMatch(root, cfg.Handoff.Directory, item.ID, item.IssueNumber)
 			if e != nil {
 				return e
+			}
+			if match.Path != "" && match.State == "ready" {
+				if e = ensureHandoffComment(cmd.Context(), s, match.Path, item); e != nil {
+					return e
+				}
 			}
 			switch decideCycle(match, cfg.Automation) {
 			case cycleImplement:
