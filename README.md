@@ -9,7 +9,7 @@
 - `OPENAI_API_KEY` for planning
 - Codex CLI for implementation
 
-Build from source with `go build -o zoro ./cmd/zoro`, or after a tagged public release use `go install github.com/zoro-cli/zoro.ai/cmd/zoro@latest`.
+Build from source with `go build -o ./cmd/zoro ./cmd/zoro`, or after a tagged public release use `go install github.com/zoro-cli/zoro.ai/cmd/zoro@latest`.
 
 ## Getting started
 
