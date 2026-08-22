@@ -106,17 +106,82 @@ func BranchName(prefix string, issue int, title string) string {
 	return fmt.Sprintf("%s/%d-%s", strings.Trim(prefix, "/"), issue, slug)
 }
 func BranchExists(ctx context.Context, root, name string) bool {
-	_, e := git(ctx, root, "show-ref", "--verify", "--quiet", "refs/heads/"+name)
-	return e == nil
+	_, err := git(
+		ctx,
+		root,
+		"show-ref",
+		"--verify",
+		"--quiet",
+		"refs/heads/"+name,
+	)
+
+	return err == nil
+}
+func RemoteBranchExists(
+	ctx context.Context,
+	root string,
+	remote string,
+	name string,
+) bool {
+	_, err := git(
+		ctx,
+		root,
+		"show-ref",
+		"--verify",
+		"--quiet",
+		"refs/remotes/"+remote+"/"+name,
+	)
+
+	return err == nil
 }
 func CreateBranch(ctx context.Context, root, name string) error {
 	if BranchExists(ctx, root, name) {
-		// delete the remote branch
-		
-		return fmt.Errorf("%w: branch %q already exists", app.ErrRepository, name)
+		_, err := git(ctx, root, "switch", name)
+		if err != nil {
+			return fmt.Errorf(
+				"%w: failed to switch to existing branch %q: %v",
+				app.ErrRepository,
+				name,
+				err,
+			)
+		}
+
+		return nil
 	}
-	_, e := git(ctx, root, "switch", "-c", name)
-	return e
+
+	if RemoteBranchExists(ctx, root, "origin", name) {
+		_, err := git(
+			ctx,
+			root,
+			"switch",
+			"--track",
+			"-c",
+			name,
+			"origin/"+name,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"%w: failed to track remote branch %q: %v",
+				app.ErrRepository,
+				name,
+				err,
+			)
+		}
+
+		return nil
+	}
+
+	_, err := git(ctx, root, "switch", "-c", name)
+	if err != nil {
+		return fmt.Errorf(
+			"%w: failed to create branch %q: %v",
+			app.ErrRepository,
+			name,
+			err,
+		)
+	}
+
+	return nil
 }
 
 func AddPaths(ctx context.Context, root string, paths ...string) error {
