@@ -29,9 +29,9 @@ type ProjectItem struct {
 	Position                        int
 }
 type Project struct {
-	ID, Title, StatusFieldID string
-	StatusOptions            map[string]string
-	Items                    []ProjectItem
+	ID, Title, StatusFieldID, Repository string
+	StatusOptions                        map[string]string
+	Items                                []ProjectItem
 }
 
 type IssueComment struct {
@@ -151,7 +151,7 @@ func (c *Client) Project(ctx context.Context, cfg config.GitHubConfig) (Project,
 	if n == nil {
 		return Project{}, fmt.Errorf("%w: GitHub repository owner %q is an %s, but project %d was not found or is not accessible", app.ErrProject, cfg.Owner, d.Repository.Owner.Type, cfg.ProjectNumber)
 	}
-	p := Project{ID: n.ID, Title: n.Title, StatusOptions: map[string]string{}}
+	p := Project{ID: n.ID, Title: n.Title, Repository: cfg.Owner + "/" + cfg.Repo, StatusOptions: map[string]string{}}
 	for _, f := range n.Fields.Nodes {
 		if f.Name == cfg.StatusField {
 			p.StatusFieldID = f.ID

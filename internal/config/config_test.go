@@ -1,6 +1,10 @@
 package config
 
-import "testing"
+import (
+	"gopkg.in/yaml.v3"
+	"strings"
+	"testing"
+)
 
 func TestValidate(t *testing.T) {
 	c := Default("acme", "app", 1)
@@ -13,6 +17,31 @@ func TestValidate(t *testing.T) {
 		mutate(&c)
 		if c.Validate() == nil {
 			t.Errorf("case %d unexpectedly valid", i)
+		}
+	}
+}
+func TestLegacyConfigDefaultsToGitHub(t *testing.T) {
+	c := Default("acme", "app", 2)
+	c.Provider = ""
+	b, _ := yaml.Marshal(c)
+	var got Config
+	if e := yaml.Unmarshal(b, &got); e != nil || got.EffectiveProvider() != "github" || got.Validate() != nil {
+		t.Fatalf("legacy config: %+v %v", got, e)
+	}
+}
+func TestGitLabValidation(t *testing.T) {
+	c := Default("", "", 1)
+	c.Provider = "gitlab"
+	c.GitHub = GitHubConfig{}
+	c.GitLab = GitLabConfig{BaseURL: "https://gitlab.example.com", Project: "group/sub/app", BoardID: 3, Statuses: Statuses{Backlog: "Backlog", Ready: "Ready", Implementing: "Doing", Review: "Review", Done: "Done"}}
+	if e := c.Validate(); e != nil {
+		t.Fatal(e)
+	}
+	for _, mutate := range []func(*Config){func(c *Config) { c.Provider = "other" }, func(c *Config) { c.GitLab.BaseURL = "ftp://bad" }, func(c *Config) { c.GitLab.BoardID = 0 }} {
+		x := c
+		mutate(&x)
+		if e := x.Validate(); e == nil || !strings.Contains(e.Error(), "config error") {
+			t.Fatalf("expected config error, got %v", e)
 		}
 	}
 }

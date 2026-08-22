@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -14,13 +15,21 @@ const Path = ".zoro/config.yaml"
 
 type Config struct {
 	Version        int                  `yaml:"version"`
+	Provider       string               `yaml:"provider,omitempty"`
 	GitHub         GitHubConfig         `yaml:"github"`
+	GitLab         GitLabConfig         `yaml:"gitlab,omitempty"`
 	Scheduler      SchedulerConfig      `yaml:"scheduler"`
 	Planning       PlanningConfig       `yaml:"planning"`
 	Automation     AutomationConfig     `yaml:"automation"`
 	Implementation ImplementationConfig `yaml:"implementation"`
 	Handoff        HandoffConfig        `yaml:"handoff"`
 	Behavior       BehaviorConfig       `yaml:"behavior"`
+}
+type GitLabConfig struct {
+	BaseURL  string   `yaml:"base_url"`
+	Project  string   `yaml:"project"`
+	BoardID  int      `yaml:"board_id"`
+	Statuses Statuses `yaml:"statuses"`
 }
 type GitHubConfig struct {
 	Owner         string   `yaml:"owner"`
@@ -73,7 +82,25 @@ type BehaviorConfig struct {
 }
 
 func Default(owner, repo string, project int) Config {
-	return Config{Version: 1, GitHub: GitHubConfig{Owner: owner, Repo: repo, ProjectNumber: project, StatusField: "Status", Statuses: Statuses{"Backlog", "Ready", "In progress", "In review", "Done"}}, Scheduler: SchedulerConfig{true, "1m"}, Planning: PlanningConfig{"openai", "gpt-5.6", 30, 300000}, Automation: AutomationConfig{true, false}, Implementation: ImplementationConfig{"codex", BranchConfig{true, "zoro"}, ValidationConfig{true, []string{"go test ./...", "go vet ./..."}}}, Handoff: HandoffConfig{"handoff"}, Behavior: BehaviorConfig{1, true, true}}
+	return Config{Version: 1, Provider: "github", GitHub: GitHubConfig{Owner: owner, Repo: repo, ProjectNumber: project, StatusField: "Status", Statuses: Statuses{Backlog: "Backlog", Ready: "Ready", Implementing: "In progress", Review: "In review", Done: "Done"}}, Scheduler: SchedulerConfig{Enabled: true, Interval: "1m"}, Planning: PlanningConfig{Provider: "openai", Model: "gpt-5.6", MaxFiles: 30, MaxContextBytes: 300000}, Automation: AutomationConfig{AutoPlan: true}, Implementation: ImplementationConfig{Provider: "codex", Branch: BranchConfig{Enabled: true, Prefix: "zoro"}, Validation: ValidationConfig{Enabled: true, Commands: []string{"go test ./...", "go vet ./..."}}}, Handoff: HandoffConfig{Directory: "handoff"}, Behavior: BehaviorConfig{MaxConcurrentTasks: 1, MoveToInProgress: true, MoveToReview: true}}
+}
+func (c Config) EffectiveProvider() string {
+	if c.Provider == "" {
+		return "github"
+	}
+	return c.Provider
+}
+func (c Config) Statuses() Statuses {
+	if c.EffectiveProvider() == "gitlab" {
+		return c.GitLab.Statuses
+	}
+	return c.GitHub.Statuses
+}
+func (c Config) Repository() string {
+	if c.EffectiveProvider() == "gitlab" {
+		return c.GitLab.Project
+	}
+	return c.GitHub.Owner + "/" + c.GitHub.Repo
 }
 func Load(root string) (Config, error) {
 	var c Config
@@ -97,11 +124,24 @@ func (c Config) Validate() error {
 	if c.Version != 1 {
 		return fmt.Errorf("%w: version must be 1", app.ErrConfig)
 	}
-	if c.GitHub.Owner == "" || c.GitHub.Repo == "" || c.GitHub.ProjectNumber <= 0 {
+	provider := c.EffectiveProvider()
+	if provider != "github" && provider != "gitlab" {
+		return fmt.Errorf("%w: provider must be github or gitlab", app.ErrConfig)
+	}
+	if provider == "github" && (c.GitHub.Owner == "" || c.GitHub.Repo == "" || c.GitHub.ProjectNumber <= 0) {
 		return fmt.Errorf("%w: github owner, repo, and positive project_number are required", app.ErrConfig)
 	}
-	if c.GitHub.StatusField == "" || c.GitHub.Statuses.Backlog == "" || c.GitHub.Statuses.Ready == "" || c.GitHub.Statuses.Implementing == "" || c.GitHub.Statuses.Review == "" || c.GitHub.Statuses.Done == "" {
+	if provider == "github" && (c.GitHub.StatusField == "" || !validStatuses(c.GitHub.Statuses)) {
 		return fmt.Errorf("%w: status field and all status mappings are required", app.ErrConfig)
+	}
+	if provider == "gitlab" {
+		u, e := url.Parse(c.GitLab.BaseURL)
+		if e != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("%w: gitlab.base_url must be an HTTP(S) URL", app.ErrConfig)
+		}
+		if c.GitLab.Project == "" || c.GitLab.BoardID <= 0 || !validStatuses(c.GitLab.Statuses) {
+			return fmt.Errorf("%w: gitlab project, positive board_id, and all status mappings are required", app.ErrConfig)
+		}
 	}
 	if _, e := c.Interval(); e != nil {
 		return e
@@ -113,6 +153,9 @@ func (c Config) Validate() error {
 		return fmt.Errorf("%w: handoff.directory and positive max_concurrent_tasks are required", app.ErrConfig)
 	}
 	return nil
+}
+func validStatuses(s Statuses) bool {
+	return s.Backlog != "" && s.Ready != "" && s.Implementing != "" && s.Review != "" && s.Done != ""
 }
 func Save(root string, c Config) error {
 	if e := c.Validate(); e != nil {

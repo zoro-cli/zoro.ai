@@ -17,6 +17,14 @@ func TestParseRemote(t *testing.T) {
 		}
 	}
 }
+func TestParseGitLabRemoteInfo(t *testing.T) {
+	for _, in := range []string{"https://gitlab.com/group/sub/app.git", "git@gitlab.example.com:group/sub/app.git", "ssh://git@gitlab.example.com/group/sub/app.git"} {
+		i, e := ParseRemoteInfo(in)
+		if e != nil || i.Namespace != "group/sub" || i.Repository != "app" {
+			t.Fatalf("%q => %+v %v", in, i, e)
+		}
+	}
+}
 func TestBranchName(t *testing.T) {
 	if got := BranchName("zoro", 142, "Add refresh token rotation"); got != "zoro/142-add-refresh-token-rotation" {
 		t.Fatal(got)

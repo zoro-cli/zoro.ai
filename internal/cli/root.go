@@ -9,6 +9,7 @@ import (
 	"github.com/zoro-cli/zoro.ai/internal/codex"
 	"github.com/zoro-cli/zoro.ai/internal/config"
 	gh "github.com/zoro-cli/zoro.ai/internal/github"
+	gl "github.com/zoro-cli/zoro.ai/internal/gitlab"
 	"github.com/zoro-cli/zoro.ai/internal/handoff"
 	"github.com/zoro-cli/zoro.ai/internal/planner"
 	"github.com/zoro-cli/zoro.ai/internal/repository"
@@ -28,8 +29,21 @@ import (
 type state struct {
 	root    string
 	cfg     config.Config
-	client  *gh.Client
+	client  workQueue
 	project gh.Project
+}
+type workQueue interface {
+	VerifyRepository(context.Context, string, string) error
+	UpdateStatus(context.Context, gh.Project, string, string) error
+	ListIssueComments(context.Context, string, string, int) ([]gh.IssueComment, error)
+	CreateIssueComment(context.Context, string, string, int, string) error
+}
+
+func queueArguments(cfg config.Config) (string, string) {
+	if cfg.EffectiveProvider() == "gitlab" {
+		return cfg.GitLab.Project, ""
+	}
+	return cfg.GitHub.Owner, cfg.GitHub.Repo
 }
 
 var (
@@ -56,7 +70,7 @@ func restoreImplementationStart(ctx context.Context, s state, original, current 
 		problems = append(problems, "restore handoff: "+e.Error())
 	}
 	if s.cfg.Behavior.MoveToInProgress {
-		if e := s.client.UpdateStatus(ctx, s.project, item.ID, s.cfg.GitHub.Statuses.Ready); e != nil {
+		if e := s.client.UpdateStatus(ctx, s.project, item.ID, s.cfg.Statuses().Ready); e != nil {
 			problems = append(problems, "restore board status: "+e.Error())
 		}
 	}
@@ -96,6 +110,15 @@ func remoteState(ctx context.Context) (state, error) {
 	if e != nil {
 		return state{}, e
 	}
+	if cfg.EffectiveProvider() == "gitlab" {
+		token, e := auth.GitLabToken(ctx)
+		if e != nil {
+			return state{}, e
+		}
+		cl := gl.New(token, cfg.GitLab.BaseURL)
+		p, e := cl.Project(ctx, cfg.GitLab)
+		return state{root, cfg, cl, p}, e
+	}
 	token, e := auth.GitHubToken(ctx)
 	if e != nil {
 		return state{}, e
@@ -106,20 +129,49 @@ func remoteState(ctx context.Context) (state, error) {
 }
 func initCmd() *cobra.Command {
 	var project int
+	var provider, gitlabURL string
+	var board int
 	c := &cobra.Command{Use: "init", Short: "Initialize Zoro in the current Git repository", RunE: func(cmd *cobra.Command, args []string) error {
 		wd, _ := os.Getwd()
 		root, e := repository.Root(cmd.Context(), wd)
 		if e != nil {
 			return e
 		}
-		owner, repo, e := repository.Remote(cmd.Context(), root)
+		remote, e := repository.RemoteDetails(cmd.Context(), root)
 		if e != nil {
 			return e
 		}
-		if project <= 0 {
-			return fmt.Errorf("--project must be a positive GitHub Project number")
+		if provider == "" {
+			switch {
+			case strings.EqualFold(remote.Host, "github.com"):
+				provider = "github"
+			case strings.EqualFold(remote.Host, "gitlab.com"):
+				provider = "gitlab"
+			default:
+				return fmt.Errorf("cannot infer provider from self-managed host %q; set --provider", remote.Host)
+			}
 		}
-		cfg := config.Default(owner, repo, project)
+		if provider != "github" && provider != "gitlab" {
+			return fmt.Errorf("--provider must be github or gitlab")
+		}
+		var cfg config.Config
+		if provider == "github" {
+			if project <= 0 {
+				return fmt.Errorf("--project must be a positive GitHub Project number")
+			}
+			cfg = config.Default(remote.Namespace, remote.Repository, project)
+		} else {
+			if board <= 0 {
+				return fmt.Errorf("--board must be a positive GitLab board ID")
+			}
+			if gitlabURL == "" {
+				gitlabURL = "https://" + remote.Host
+			}
+			cfg = config.Default("", "", 1)
+			cfg.Provider = "gitlab"
+			cfg.GitHub = config.GitHubConfig{}
+			cfg.GitLab = config.GitLabConfig{BaseURL: gitlabURL, Project: remote.Namespace + "/" + remote.Repository, BoardID: board, Statuses: config.Statuses{Backlog: "Backlog", Ready: "Ready", Implementing: "In progress", Review: "In review", Done: "Done"}}
+		}
 		if e = config.Save(root, cfg); e != nil {
 			return e
 		}
@@ -129,11 +181,13 @@ func initCmd() *cobra.Command {
 		if e = ensureGitignore(root, ".zoro/runtime/"); e != nil {
 			return e
 		}
-		fmt.Printf("Initialized zoro.ai for %s/%s (project %d)\n", owner, repo, project)
+		fmt.Printf("Initialized zoro.ai for %s using %s\n", cfg.Repository(), provider)
 		return nil
 	}}
 	c.Flags().IntVar(&project, "project", 0, "GitHub Project number (required)")
-	_ = c.MarkFlagRequired("project")
+	c.Flags().StringVar(&provider, "provider", "", "work queue provider: github or gitlab")
+	c.Flags().StringVar(&gitlabURL, "gitlab-url", "", "GitLab base URL (defaults to origin host)")
+	c.Flags().IntVar(&board, "board", 0, "GitLab board ID")
 	return c
 }
 func ensureGitignore(root, line string) error {
@@ -162,7 +216,8 @@ func authCmd() *cobra.Command {
 		if e != nil {
 			return e
 		}
-		if e = s.client.VerifyRepository(cmd.Context(), s.cfg.GitHub.Owner, s.cfg.GitHub.Repo); e != nil {
+		owner, repo := queueArguments(s.cfg)
+		if e = s.client.VerifyRepository(cmd.Context(), owner, repo); e != nil {
 			return e
 		}
 		fmt.Printf("Authenticated; repository and project %q are accessible.\n", s.project.Title)
@@ -175,7 +230,8 @@ func boardCmd() *cobra.Command {
 		if e != nil {
 			return e
 		}
-		labels := []string{s.cfg.GitHub.Statuses.Backlog, s.cfg.GitHub.Statuses.Ready, s.cfg.GitHub.Statuses.Implementing, s.cfg.GitHub.Statuses.Review, s.cfg.GitHub.Statuses.Done}
+		statuses := s.cfg.Statuses()
+		labels := []string{statuses.Backlog, statuses.Ready, statuses.Implementing, statuses.Review, statuses.Done}
 		for _, label := range labels {
 			n := 0
 			for _, it := range s.project.Items {
@@ -195,7 +251,7 @@ func readyCmd() *cobra.Command {
 			return e
 		}
 		fmt.Println("Ready")
-		for i, it := range s.project.Ready(s.cfg.GitHub.Statuses.Ready) {
+		for i, it := range s.project.Ready(s.cfg.Statuses().Ready) {
 			fmt.Printf("%d. #%d %s\n", i+1, it.IssueNumber, it.Title)
 		}
 		return nil
@@ -220,7 +276,7 @@ func planCmd() *cobra.Command {
 				}
 			}
 		} else {
-			r := s.project.Ready(s.cfg.GitHub.Statuses.Ready)
+			r := s.project.Ready(s.cfg.Statuses().Ready)
 			if len(r) > 0 {
 				it = r[0]
 			}
@@ -240,7 +296,7 @@ func createPlan(ctx context.Context, s state, it gh.ProjectItem) (string, error)
 	if p, _, e := handoff.Find(s.root, s.cfg.Handoff.Directory, it.ID, it.IssueNumber); e != nil {
 		return "", e
 	} else if p != "" {
-		if it.Status == s.cfg.GitHub.Statuses.Ready {
+		if it.Status == s.cfg.Statuses().Ready {
 			if e = ensureHandoffComment(ctx, s, p, it); e != nil {
 				return "", e
 			}
@@ -255,11 +311,11 @@ func createPlan(ctx context.Context, s state, it gh.ProjectItem) (string, error)
 	if e != nil {
 		return "", e
 	}
-	path, e := handoff.Save(s.root, s.cfg.Handoff.Directory, handoff.Metadata{Repository: s.cfg.GitHub.Owner + "/" + s.cfg.GitHub.Repo, ProjectItemID: it.ID, Issue: it.IssueNumber, Title: it.Title, CreatedAt: time.Now().UTC(), DirtyAtPlanning: rc.Dirty}, p)
+	path, e := handoff.Save(s.root, s.cfg.Handoff.Directory, handoff.Metadata{Repository: s.cfg.Repository(), ProjectItemID: it.ID, Issue: it.IssueNumber, Title: it.Title, CreatedAt: time.Now().UTC(), DirtyAtPlanning: rc.Dirty}, p)
 	if e != nil {
 		return "", e
 	}
-	if it.Status == s.cfg.GitHub.Statuses.Ready {
+	if it.Status == s.cfg.Statuses().Ready {
 		if e = ensureHandoffComment(ctx, s, path, it); e != nil {
 			return "", e
 		}
@@ -269,9 +325,9 @@ func createPlan(ctx context.Context, s state, it gh.ProjectItem) (string, error)
 
 func ensureHandoffComment(ctx context.Context, s state, path string, it gh.ProjectItem) error {
 	if it.IssueNumber <= 0 || it.Repository == "" {
-		return fmt.Errorf("Ready project item %q is not backed by a commentable GitHub issue", it.Title)
+		return fmt.Errorf("Ready project item %q is not backed by a commentable issue", it.Title)
 	}
-	repositoryName := s.cfg.GitHub.Owner + "/" + s.cfg.GitHub.Repo
+	repositoryName := s.cfg.Repository()
 	if it.Repository != repositoryName {
 		return fmt.Errorf("Ready issue belongs to %s, not configured repository %s", it.Repository, repositoryName)
 	}
@@ -280,7 +336,8 @@ func ensureHandoffComment(ctx context.Context, s state, path string, it gh.Proje
 		return fmt.Errorf("prepare handoff comment: %w", e)
 	}
 	marker := handoff.CommentMarker(repositoryName, it.ID)
-	comments, e := s.client.ListIssueComments(ctx, s.cfg.GitHub.Owner, s.cfg.GitHub.Repo, it.IssueNumber)
+	owner, repo := queueArguments(s.cfg)
+	comments, e := s.client.ListIssueComments(ctx, owner, repo, it.IssueNumber)
 	if e != nil {
 		return fmt.Errorf("list handoff comments: %w", e)
 	}
@@ -289,7 +346,7 @@ func ensureHandoffComment(ctx context.Context, s state, path string, it gh.Proje
 			return nil
 		}
 	}
-	if e = s.client.CreateIssueComment(ctx, s.cfg.GitHub.Owner, s.cfg.GitHub.Repo, it.IssueNumber, body); e != nil {
+	if e = s.client.CreateIssueComment(ctx, owner, repo, it.IssueNumber, body); e != nil {
 		return fmt.Errorf("create handoff comment: %w", e)
 	}
 	return nil
@@ -386,7 +443,7 @@ func implementLocked(ctx context.Context, s state, path string, item gh.ProjectI
 		return e
 	}
 	if cfg.Behavior.MoveToInProgress {
-		if e = s.client.UpdateStatus(ctx, s.project, item.ID, cfg.GitHub.Statuses.Implementing); e != nil {
+		if e = s.client.UpdateStatus(ctx, s.project, item.ID, cfg.Statuses().Implementing); e != nil {
 			if restoreErr := restoreImplementationStart(ctx, s, path, current, item, false); restoreErr != nil {
 				return fmt.Errorf("board synchronization failed: %w; %v", e, restoreErr)
 			}
@@ -439,7 +496,7 @@ func implementLocked(ctx context.Context, s state, path string, item gh.ProjectI
 		return fmt.Errorf("commit completed implementation: %w", e)
 	}
 	if cfg.Behavior.MoveToReview {
-		if e = s.client.UpdateStatus(ctx, s.project, item.ID, cfg.GitHub.Statuses.Review); e != nil {
+		if e = s.client.UpdateStatus(ctx, s.project, item.ID, cfg.Statuses().Review); e != nil {
 			return fmt.Errorf("local implementation succeeded at %s, but board synchronization failed: %w", review, e)
 		}
 	}
@@ -484,7 +541,7 @@ func runCmd() *cobra.Command {
 			if e != nil {
 				return e
 			}
-			items := s.project.Ready(cfg.GitHub.Statuses.Ready)
+			items := s.project.Ready(cfg.Statuses().Ready)
 			if len(items) == 0 {
 				fmt.Println("No Ready items.")
 				return nil
@@ -552,7 +609,7 @@ func statusCmd() *cobra.Command {
 		if e != nil {
 			return e
 		}
-		fmt.Printf("Repository          %s\nGitHub project      %s/%s #%d\nScheduler enabled   %t\nPolling interval    %s\nAuto implement      %t\n", root, cfg.GitHub.Owner, cfg.GitHub.Repo, cfg.GitHub.ProjectNumber, cfg.Scheduler.Enabled, cfg.Scheduler.Interval, cfg.Automation.AutoImplement)
+		fmt.Printf("Repository          %s\nProvider            %s\nWork queue          %s\nScheduler enabled   %t\nPolling interval    %s\nAuto implement      %t\n", root, cfg.EffectiveProvider(), cfg.Repository(), cfg.Scheduler.Enabled, cfg.Scheduler.Interval, cfg.Automation.AutoImplement)
 		for _, state := range []string{"ready", "implementing", "review", "failed"} {
 			f, _ := handoff.List(root, cfg.Handoff.Directory, state)
 			fmt.Printf("%-18s %d\n", strings.Title(state)+" handoffs", len(f))
@@ -603,7 +660,7 @@ func doctorCmd() *cobra.Command {
 		root, e := repository.Root(cmd.Context(), wd)
 		check("Git repository", e == nil, false)
 		check("Git executable", look("git"), false)
-		check("GitHub CLI", look("gh"), true)
+		check("GitHub/GitLab CLI", look("gh") || look("glab"), true)
 		check("Codex CLI", codex.Available(), false)
 		check("Go runtime", look("go"), true)
 		check("OpenAI API key", os.Getenv("OPENAI_API_KEY") != "", false)
@@ -620,13 +677,24 @@ func doctorCmd() *cobra.Command {
 					}
 				}
 				check("Handoff directories", dirs, false)
-				token, te := auth.GitHubToken(cmd.Context())
-				check("GitHub auth", te == nil, false)
-				if te == nil {
-					cl := gh.New(token)
-					check("GitHub repository", cl.VerifyRepository(cmd.Context(), cfg.GitHub.Owner, cfg.GitHub.Repo) == nil, false)
-					_, pe := cl.Project(cmd.Context(), cfg.GitHub)
-					check("GitHub project", pe == nil, false)
+				if cfg.EffectiveProvider() == "gitlab" {
+					token, te := auth.GitLabToken(cmd.Context())
+					check("GitLab auth", te == nil, false)
+					if te == nil {
+						cl := gl.New(token, cfg.GitLab.BaseURL)
+						check("GitLab project", cl.VerifyRepository(cmd.Context(), cfg.GitLab.Project, "") == nil, false)
+						_, pe := cl.Project(cmd.Context(), cfg.GitLab)
+						check("GitLab board", pe == nil, false)
+					}
+				} else {
+					token, te := auth.GitHubToken(cmd.Context())
+					check("GitHub auth", te == nil, false)
+					if te == nil {
+						cl := gh.New(token)
+						check("GitHub repository", cl.VerifyRepository(cmd.Context(), cfg.GitHub.Owner, cfg.GitHub.Repo) == nil, false)
+						_, pe := cl.Project(cmd.Context(), cfg.GitHub)
+						check("GitHub project", pe == nil, false)
+					}
 				}
 			}
 		}

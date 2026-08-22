@@ -6,6 +6,7 @@ var (
 	ErrConfig     = errors.New("config error")
 	ErrAuth       = errors.New("authentication error")
 	ErrGitHub     = errors.New("github error")
+	ErrGitLab     = errors.New("gitlab error")
 	ErrProject    = errors.New("project error")
 	ErrRepository = errors.New("repository error")
 	ErrPlanner    = errors.New("planner error")

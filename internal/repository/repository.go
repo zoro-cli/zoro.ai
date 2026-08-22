@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -83,15 +84,37 @@ func Remote(ctx context.Context, root string) (string, string, error) {
 	}
 	return ParseRemote(s)
 }
+func RemoteDetails(ctx context.Context, root string) (RemoteInfo, error) {
+	s, e := git(ctx, root, "remote", "get-url", "origin")
+	if e != nil {
+		return RemoteInfo{}, e
+	}
+	return ParseRemoteInfo(s)
+}
 
-var remoteRE = regexp.MustCompile(`(?i)(?:github\.com[:/])([^/]+)/([^/]+?)(?:\.git)?$`)
+type RemoteInfo struct{ Host, Namespace, Repository string }
 
 func ParseRemote(s string) (string, string, error) {
-	m := remoteRE.FindStringSubmatch(strings.TrimSpace(s))
-	if len(m) != 3 {
-		return "", "", fmt.Errorf("%w: unsupported GitHub remote %q", app.ErrRepository, s)
+	i, e := ParseRemoteInfo(s)
+	if e != nil {
+		return "", "", e
 	}
-	return m[1], strings.TrimSuffix(m[2], ".git"), nil
+	return i.Namespace, i.Repository, nil
+}
+func ParseRemoteInfo(s string) (RemoteInfo, error) {
+	raw := strings.TrimSpace(s)
+	if m := regexp.MustCompile(`^[^@/]+@([^:]+):(.+)$`).FindStringSubmatch(raw); len(m) == 3 {
+		raw = "ssh://" + m[1] + "/" + m[2]
+	}
+	u, e := url.Parse(raw)
+	if e != nil || u.Hostname() == "" {
+		return RemoteInfo{}, fmt.Errorf("%w: unsupported remote %q", app.ErrRepository, s)
+	}
+	parts := strings.Split(strings.Trim(strings.TrimSuffix(u.Path, ".git"), "/"), "/")
+	if len(parts) < 2 {
+		return RemoteInfo{}, fmt.Errorf("%w: unsupported remote %q", app.ErrRepository, s)
+	}
+	return RemoteInfo{Host: u.Hostname(), Namespace: strings.Join(parts[:len(parts)-1], "/"), Repository: parts[len(parts)-1]}, nil
 }
 func Slug(s string) string {
 	s = strings.ToLower(s)
