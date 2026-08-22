@@ -1,0 +1,39 @@
+version: 1
+github:
+    owner: zoro-cli
+    repo: zoro.ai
+    project_number: 1
+    status_field: Status
+    statuses:
+        backlog: Backlog
+        ready: Ready
+        implementing: In progress
+        review: In review
+        done: Done
+scheduler:
+    enabled: true
+    interval: 1m
+planning:
+    provider: openai
+    model: gpt-5.6
+    max_files: 30
+    max_context_bytes: 300000
+automation:
+    auto_plan: true
+    auto_implement: false
+implementation:
+    provider: codex
+    branch:
+        enabled: true
+        prefix: zoro
+    validation:
+        enabled: true
+        commands:
+            - go test ./...
+            - go vet ./...
+handoff:
+    directory: handoff
+behavior:
+    max_concurrent_tasks: 1
+    move_to_in_progress_on_implement: true
+    move_to_review_on_success: true
