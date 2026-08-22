@@ -3,6 +3,7 @@ package repository
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -113,6 +114,67 @@ func CreateBranch(ctx context.Context, root, name string) error {
 		return fmt.Errorf("%w: branch %q already exists", app.ErrRepository, name)
 	}
 	_, e := git(ctx, root, "switch", "-c", name)
+	return e
+}
+
+func AddPaths(ctx context.Context, root string, paths ...string) error {
+	args := []string{"add", "-A", "--"}
+	for _, path := range paths {
+		rel, e := filepath.Rel(root, path)
+		if e != nil {
+			return fmt.Errorf("%w: resolve path %q: %v", app.ErrRepository, path, e)
+		}
+		if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("%w: path %q is outside repository", app.ErrRepository, path)
+		}
+		args = append(args, filepath.ToSlash(rel))
+	}
+	_, e := git(ctx, root, args...)
+	return e
+}
+
+func AddAll(ctx context.Context, root string) error {
+	_, e := git(ctx, root, "add", "-A", "--", ".")
+	return e
+}
+
+func UnstagePaths(ctx context.Context, root string, paths ...string) error {
+	args := []string{"reset", "--"}
+	for _, path := range paths {
+		rel, e := filepath.Rel(root, path)
+		if e != nil {
+			return fmt.Errorf("%w: resolve path %q: %v", app.ErrRepository, path, e)
+		}
+		if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("%w: path %q is outside repository", app.ErrRepository, path)
+		}
+		args = append(args, filepath.ToSlash(rel))
+	}
+	_, e := git(ctx, root, args...)
+	return e
+}
+
+func HasStagedChanges(ctx context.Context, root string) (bool, error) {
+	c := exec.CommandContext(ctx, "git", "diff", "--cached", "--quiet")
+	c.Dir = root
+	var stderr bytes.Buffer
+	c.Stderr = &stderr
+	e := c.Run()
+	if e == nil {
+		return false, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(e, &exitErr) && exitErr.ExitCode() == 1 {
+		return true, nil
+	}
+	return false, fmt.Errorf("%w: git diff --cached --quiet: %s", app.ErrRepository, strings.TrimSpace(stderr.String()))
+}
+
+func Commit(ctx context.Context, root, message string) error {
+	if strings.TrimSpace(message) == "" {
+		return fmt.Errorf("%w: commit message is required", app.ErrRepository)
+	}
+	_, e := git(ctx, root, "commit", "-m", message)
 	return e
 }
 

@@ -1,10 +1,18 @@
 package cli
 
 import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/zoro-cli/zoro.ai/internal/config"
+	gh "github.com/zoro-cli/zoro.ai/internal/github"
 	"github.com/zoro-cli/zoro.ai/internal/handoff"
+	"github.com/zoro-cli/zoro.ai/internal/process"
+	"github.com/zoro-cli/zoro.ai/internal/validation"
 )
 
 func TestDecideCycle(t *testing.T) {
@@ -35,4 +43,100 @@ func TestDecideCycle(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestImplementLockedCreatesLifecycleCommits(t *testing.T) {
+	root, ready := implementationRepository(t)
+	originalCodex, originalValidation := runCodex, runValidation
+	t.Cleanup(func() { runCodex, runValidation = originalCodex, originalValidation })
+	runCodex = func(_ context.Context, gotRoot, current string) (process.Result, error) {
+		if got := testGit(t, gotRoot, "status", "--porcelain"); got != "" {
+			t.Fatalf("Codex started in dirty repository: %s", got)
+		}
+		if !strings.Contains(filepath.ToSlash(current), "/handoff/implementing/") {
+			t.Fatalf("unexpected handoff path: %s", current)
+		}
+		if e := os.WriteFile(filepath.Join(gotRoot, "implementation.txt"), []byte("done"), 0644); e != nil {
+			t.Fatal(e)
+		}
+		return process.Result{}, nil
+	}
+	runValidation = func(context.Context, string, []string) ([]validation.Result, error) { return nil, nil }
+	cfg := testImplementationConfig()
+	s := state{root: root, cfg: cfg, project: gh.Project{}}
+	item := gh.ProjectItem{ID: "item-9", IssueNumber: 9, Title: "Work"}
+	if e := implementLocked(context.Background(), s, ready, item); e != nil {
+		t.Fatal(e)
+	}
+	log := strings.Split(testGit(t, root, "log", "-2", "--format=%s"), "\n")
+	if len(log) != 2 || log[0] != implementationCompleteMessage(9) || log[1] != implementationStartMessage(9) {
+		t.Fatalf("unexpected lifecycle commits: %q", log)
+	}
+	firstPaths := testGit(t, root, "show", "--format=", "--name-status", "HEAD~1")
+	if !strings.Contains(firstPaths, "handoff/implementing/9-work.md") || strings.Contains(firstPaths, "implementation.txt") {
+		t.Fatalf("unexpected start commit:\n%s", firstPaths)
+	}
+	if got := testGit(t, root, "status", "--porcelain"); got != "" {
+		t.Fatalf("repository is dirty: %s", got)
+	}
+}
+
+func TestImplementLockedDoesNotCompleteCommitAfterCodexFailure(t *testing.T) {
+	root, ready := implementationRepository(t)
+	originalCodex := runCodex
+	t.Cleanup(func() { runCodex = originalCodex })
+	runCodex = func(context.Context, string, string) (process.Result, error) {
+		return process.Result{}, context.Canceled
+	}
+	cfg := testImplementationConfig()
+	e := implementLocked(context.Background(), state{root: root, cfg: cfg}, ready, gh.ProjectItem{ID: "item-9"})
+	if e == nil {
+		t.Fatal("expected Codex failure")
+	}
+	if got := testGit(t, root, "log", "-1", "--format=%s"); got != implementationStartMessage(9) {
+		t.Fatalf("unexpected last commit: %q", got)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "handoff", "failed", "9-work.md")); statErr != nil {
+		t.Fatalf("handoff was not moved to failed: %v", statErr)
+	}
+}
+
+func implementationRepository(t *testing.T) (string, string) {
+	t.Helper()
+	root := t.TempDir()
+	testGit(t, root, "init", "-q")
+	testGit(t, root, "config", "user.name", "Zoro Test")
+	testGit(t, root, "config", "user.email", "zoro@example.invalid")
+	if e := handoff.Ensure(root, "handoff"); e != nil {
+		t.Fatal(e)
+	}
+	ready := filepath.Join(root, "handoff", "ready", "9-work.md")
+	if e := os.MkdirAll(filepath.Dir(ready), 0755); e != nil {
+		t.Fatal(e)
+	}
+	content := "---\nissue: 9\ntitle: Work\nproject_item_id: item-9\n---\n"
+	if e := os.WriteFile(ready, []byte(content), 0644); e != nil {
+		t.Fatal(e)
+	}
+	testGit(t, root, "add", ".")
+	testGit(t, root, "commit", "-m", "initial")
+	return root, ready
+}
+
+func testImplementationConfig() config.Config {
+	return config.Config{
+		Handoff:        config.HandoffConfig{Directory: "handoff"},
+		Implementation: config.ImplementationConfig{Validation: config.ValidationConfig{Enabled: true}},
+	}
+}
+
+func testGit(t *testing.T, root string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = root
+	out, e := cmd.CombinedOutput()
+	if e != nil {
+		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), e, out)
+	}
+	return strings.TrimSpace(string(out))
 }

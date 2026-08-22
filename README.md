@@ -32,7 +32,7 @@ Initialization derives the GitHub owner and repository from `origin`, creates `.
 - `zoro doctor` checks configuration, tools, credentials, project fields, and directories. A dirty tree is a warning.
 - `zoro board` prints status counts; `zoro ready` prints Ready items in project connection order.
 - `zoro plan [issue]` collects bounded, secret-filtered repository context and asks OpenAI for a structured plan. Zoro validates the JSON and renders deterministic Markdown in `handoff/ready`.
-- `zoro implement [issue]` selects a handoff, requires a clean tree, creates a `zoro/<issue>-<slug>` branch, moves the card to In progress, runs Codex and validation, then moves the handoff/card to review. It never marks work Done.
+- `zoro implement [issue]` selects a handoff, requires a clean tree, creates a `zoro/<issue>-<slug>` branch, and commits the handoff's move into `implementing` before Codex starts. After Codex and validation succeed, it commits all implementation changes together with the handoff's move to `review`, then moves the card to In review. It never pushes, opens a pull request, merges, or marks work Done.
 - `zoro run --once` performs one planning cycle. `zoro run` repeats at `scheduler.interval`, shows a waiting spinner in interactive terminals, and exits on SIGINT/SIGTERM. Redirected output remains plain.
 - `zoro status` reports local state. `zoro config` prints non-secret effective configuration; `zoro config path` prints its path.
 
