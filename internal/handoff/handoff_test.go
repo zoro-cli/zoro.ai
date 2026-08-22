@@ -1,6 +1,7 @@
 package handoff
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -38,6 +39,45 @@ func TestFilename(t *testing.T) {
 				t.Fatal("filename generation is not deterministic")
 			}
 		})
+	}
+}
+
+func TestCommentBodyPreservesHandoffAndValidatesIdentity(t *testing.T) {
+	root := t.TempDir()
+	m := Metadata{Repository: "acme/app", ProjectItemID: "item-7", Issue: 7, Title: "Work"}
+	path, e := Save(root, "handoff", m, planner.Plan{Summary: "Keep this markdown"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	saved, _ := os.ReadFile(path)
+	body, e := CommentBody(path, m)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if !strings.HasPrefix(body, string(saved)) || !strings.HasSuffix(body, CommentMarker("acme/app", "item-7")) {
+		t.Fatalf("unexpected comment body %q", body)
+	}
+	if _, e = CommentBody(path, Metadata{Repository: "acme/app", ProjectItemID: "other", Issue: 7}); e == nil {
+		t.Fatal("mismatched identity accepted")
+	}
+}
+
+func TestCommentBodyRejectsMalformedAndOversizedHandoffs(t *testing.T) {
+	root := t.TempDir()
+	malformed := filepath.Join(root, "malformed.md")
+	if e := os.WriteFile(malformed, []byte("not frontmatter"), 0644); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := CommentBody(malformed, Metadata{}); e == nil {
+		t.Fatal("malformed handoff accepted")
+	}
+	m := Metadata{Repository: "acme/app", ProjectItemID: "item-7", Issue: 7, Title: "Work"}
+	path, e := Save(root, "handoff", m, planner.Plan{Summary: strings.Repeat("x", MaxCommentRunes)})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = CommentBody(path, m); e == nil || !strings.Contains(e.Error(), "character limit") {
+		t.Fatalf("unexpected oversized result %v", e)
 	}
 }
 
