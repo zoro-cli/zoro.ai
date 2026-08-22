@@ -20,7 +20,7 @@ planning:
     max_context_bytes: 300000
 automation:
     auto_plan: true
-    auto_implement: false
+    auto_implement: true
 implementation:
     provider: codex
     branch:
