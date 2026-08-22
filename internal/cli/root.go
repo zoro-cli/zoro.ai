@@ -503,6 +503,7 @@ func runCmd() *cobra.Command {
 			case cycleImplement:
 				return implementLocked(cmd.Context(), s, match.Path, item)
 			case cyclePlan:
+				fmt.Printf("Creating a handoff ...")
 				path, e := createPlan(cmd.Context(), s, item)
 				if e != nil {
 					return e

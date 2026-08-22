@@ -111,6 +111,8 @@ func BranchExists(ctx context.Context, root, name string) bool {
 }
 func CreateBranch(ctx context.Context, root, name string) error {
 	if BranchExists(ctx, root, name) {
+		// delete the remote branch
+		
 		return fmt.Errorf("%w: branch %q already exists", app.ErrRepository, name)
 	}
 	_, e := git(ctx, root, "switch", "-c", name)
